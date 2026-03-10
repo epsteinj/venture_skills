@@ -16,7 +16,7 @@ from cold_email_skill.skill import ColdEmailSkill
 
 def _make_lead(**overrides) -> Lead:
     defaults = dict(
-        specter_id="sp-1",
+        specter_id="per_001",
         first_name="Jane",
         last_name="Doe",
         email="jane@acme.com",
@@ -28,11 +28,17 @@ def _make_lead(**overrides) -> Lead:
 
 
 class FakeSpecter:
-    def __init__(self, leads: list[Lead]) -> None:
+    def __init__(self, leads: list[Lead], *, emails: dict[str, str] | None = None) -> None:
         self._leads = leads
+        self._emails = emails or {}
 
     def get_leads(self, *, limit: int = 50) -> list[Lead]:
         return self._leads[:limit]
+
+    def resolve_lead_email(self, lead: Lead) -> Lead:
+        if lead.specter_id in self._emails:
+            lead.email = self._emails[lead.specter_id]
+        return lead
 
 
 class FakeAffinity:
@@ -109,6 +115,40 @@ def test_multiple_leads_mixed():
     assert result.leads_fetched == 3
     assert result.already_contacted == 1
     assert result.drafts_created == 2
+
+
+def test_lead_without_email_resolved_from_specter():
+    """Lead has no email initially — Specter resolve_lead_email fills it in."""
+    lead = _make_lead(specter_id="per_99", email="")
+    n8n = FakeN8N()
+    skill = ColdEmailSkill(
+        specter=FakeSpecter([lead], emails={"per_99": "resolved@acme.com"}),
+        affinity=FakeAffinity(),
+        n8n=n8n,
+        sender_email="me@co.com",
+    )
+    result = skill.run()
+
+    assert result.emails_resolved == 1
+    assert result.drafts_created == 1
+    assert n8n.drafts[0].to_email == "resolved@acme.com"
+
+
+def test_lead_without_email_and_no_resolution_skipped():
+    """Lead has no email and Specter can't resolve it — skip."""
+    lead = _make_lead(specter_id="per_00", email="")
+    n8n = FakeN8N()
+    skill = ColdEmailSkill(
+        specter=FakeSpecter([lead]),
+        affinity=FakeAffinity(),
+        n8n=n8n,
+        sender_email="me@co.com",
+    )
+    result = skill.run()
+
+    assert result.no_email == 1
+    assert result.drafts_created == 0
+    assert len(n8n.drafts) == 0
 
 
 def test_error_on_one_lead_does_not_stop_others():
