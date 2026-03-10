@@ -3,8 +3,9 @@
 Pipeline:
   1. Pull leads from a Specter people list or saved search
   2. Resolve each lead's email via Specter (separate API call)
-  3. Check Affinity for recent interactions with that email
-  4. If no recent interaction → create an Outlook email draft via N8N webhook
+  3. Skip if already drafted (dedup store)
+  4. Check Affinity for recent interactions with that email
+  5. If no recent interaction → create an Outlook email draft via N8N webhook
 """
 
 from __future__ import annotations
@@ -14,7 +15,8 @@ from dataclasses import dataclass, field
 
 from cold_email_skill.clients.affinity import AffinityClient
 from cold_email_skill.clients.n8n import N8NClient
-from cold_email_skill.clients.specter import SpecterClient
+from cold_email_skill.clients.specter import CreditBudgetExceeded, SpecterClient
+from cold_email_skill.dedup import DedupStore
 from cold_email_skill.models.email_draft import EmailDraft
 from cold_email_skill.models.lead import Lead
 
@@ -26,8 +28,10 @@ class SkillResult:
     leads_fetched: int = 0
     emails_resolved: int = 0
     no_email: int = 0
+    already_drafted: int = 0
     already_contacted: int = 0
     drafts_created: int = 0
+    credits_used: int = 0
     errors: list[str] = field(default_factory=list)
 
 
@@ -40,12 +44,14 @@ class ColdEmailSkill:
         *,
         sender_email: str,
         days_since_last_interaction: int = 90,
+        dedup: DedupStore | None = None,
     ) -> None:
         self._specter = specter
         self._affinity = affinity
         self._n8n = n8n
         self._sender_email = sender_email
         self._days = days_since_last_interaction
+        self._dedup = dedup
 
     def run(
         self,
@@ -61,31 +67,47 @@ class ColdEmailSkill:
         """
         result = SkillResult()
 
-        leads = self._fetch_leads(
-            limit=limit,
-            people_list_id=people_list_id,
-            saved_search_id=saved_search_id,
-        )
+        try:
+            leads = self._fetch_leads(
+                limit=limit,
+                people_list_id=people_list_id,
+                saved_search_id=saved_search_id,
+            )
+        except CreditBudgetExceeded as exc:
+            result.errors.append(str(exc))
+            logger.error("Credit budget exceeded during lead fetch: %s", exc)
+            result.credits_used = self._specter.credits_used
+            return result
+
         result.leads_fetched = len(leads)
         logger.info("Fetched %d leads from Specter", len(leads))
 
         for lead in leads:
             try:
                 self._process_lead(lead, result)
+            except CreditBudgetExceeded as exc:
+                msg = f"Credit budget exceeded at {lead.specter_id}: {exc}"
+                logger.warning(msg)
+                result.errors.append(msg)
+                break  # stop processing further leads
             except Exception as exc:
                 identifier = lead.email or lead.specter_id
                 msg = f"Error processing {identifier}: {exc}"
                 logger.error(msg)
                 result.errors.append(msg)
 
+        result.credits_used = self._specter.credits_used
         logger.info(
             "Done – %d fetched, %d emails resolved, %d no email, "
-            "%d already contacted, %d drafts created, %d errors",
+            "%d already drafted, %d already contacted, "
+            "%d drafts created, %d credits used, %d errors",
             result.leads_fetched,
             result.emails_resolved,
             result.no_email,
+            result.already_drafted,
             result.already_contacted,
             result.drafts_created,
+            result.credits_used,
             len(result.errors),
         )
         return result
@@ -120,17 +142,27 @@ class ColdEmailSkill:
 
         result.emails_resolved += 1
 
-        # Step 2: check Affinity
+        # Step 2: dedup check
+        if self._dedup and self._dedup.already_drafted(lead.email):
+            logger.info("Skipping %s – already drafted in a previous run", lead.email)
+            result.already_drafted += 1
+            return
+
+        # Step 3: check Affinity
         if self._affinity.has_recent_interaction(lead.email, days=self._days):
             logger.info("Skipping %s – recent Affinity interaction", lead.email)
             result.already_contacted += 1
             return
 
-        # Step 3: create Outlook draft via N8N
+        # Step 4: create Outlook draft via N8N
         draft = self._build_draft(lead)
         self._n8n.create_outlook_draft(draft)
         logger.info("Draft created for %s", lead.email)
         result.drafts_created += 1
+
+        # Step 5: record in dedup store
+        if self._dedup:
+            self._dedup.record_draft(lead.email, lead.specter_id)
 
     def _build_draft(self, lead: Lead) -> EmailDraft:
         subject = f"Quick intro – {lead.company}"

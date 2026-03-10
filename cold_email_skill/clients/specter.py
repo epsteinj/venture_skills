@@ -6,7 +6,8 @@ Base URL  : https://app.tryspecter.com/api/v1
 Auth      : X-API-Key header
 Rate limit: 15 req/s (HTTP 429 on exceed)
 Pagination: page (0-based) + limit (default 50, max 5000)
-Credits   : 1 per result returned
+Credits   : 1 per result returned; tracked via response headers
+              X-CreditLimit-Limit / X-CreditLimit-Remaining / X-CreditLimit-Reset
 """
 
 from __future__ import annotations
@@ -22,13 +23,64 @@ logger = logging.getLogger(__name__)
 _DEFAULT_BASE = "https://app.tryspecter.com/api/v1"
 
 
+class CreditBudgetExceeded(Exception):
+    """Raised when a Specter call would exceed the configured credit budget."""
+
+
 class SpecterClient:
-    def __init__(self, api_key: str, base_url: str = _DEFAULT_BASE) -> None:
+    def __init__(
+        self,
+        api_key: str,
+        base_url: str = _DEFAULT_BASE,
+        *,
+        max_credits: int | None = None,
+    ) -> None:
         self._client = httpx.Client(
             base_url=base_url,
             headers={"X-API-Key": api_key},
             timeout=30,
         )
+        self._max_credits = max_credits
+        self._credits_used = 0
+
+        # Updated after each response from X-CreditLimit-* headers
+        self._credit_limit: int | None = None
+        self._credit_remaining: int | None = None
+
+    # ------------------------------------------------------------------
+    # Credit tracking
+    # ------------------------------------------------------------------
+
+    @property
+    def credits_used(self) -> int:
+        return self._credits_used
+
+    @property
+    def credit_remaining(self) -> int | None:
+        """Remaining credits as reported by the last Specter response."""
+        return self._credit_remaining
+
+    def _track_credits(self, resp: httpx.Response, estimated: int = 1) -> None:
+        """Read credit headers and update internal counters."""
+        limit = resp.headers.get("X-CreditLimit-Limit")
+        remaining = resp.headers.get("X-CreditLimit-Remaining")
+
+        if limit is not None:
+            self._credit_limit = int(limit)
+        if remaining is not None:
+            self._credit_remaining = int(remaining)
+
+        self._credits_used += estimated
+
+    def _check_budget(self, estimated_cost: int = 1) -> None:
+        """Raise if the next call would exceed the configured budget."""
+        if self._max_credits is not None:
+            if self._credits_used + estimated_cost > self._max_credits:
+                raise CreditBudgetExceeded(
+                    f"Would exceed credit budget: "
+                    f"{self._credits_used} used + {estimated_cost} needed "
+                    f"> {self._max_credits} max"
+                )
 
     # ------------------------------------------------------------------
     # Lead sources
@@ -49,6 +101,7 @@ class SpecterClient:
         Returns full person profiles. Email is NOT included — call
         resolve_lead_email() afterwards.
         """
+        self._check_budget(limit)
         results = self._paginate(f"/lists/people/{list_id}/results", limit=limit)
         return self._parse_people(results)
 
@@ -58,6 +111,7 @@ class SpecterClient:
         Returns full person profiles. Email is NOT included — call
         resolve_lead_email() afterwards.
         """
+        self._check_budget(limit)
         results = self._paginate(f"/searches/people/{search_id}/results", limit=limit)
         return self._parse_people(results)
 
@@ -71,6 +125,7 @@ class SpecterClient:
         Uses a waterfall across providers. Returns the email string or
         None if unavailable. Costs 1 credit per email returned.
         """
+        self._check_budget(1)
         resp = self._client.get(
             f"/people/{person_id}/email",
             params={"type": email_type},
@@ -78,6 +133,7 @@ class SpecterClient:
         if resp.status_code == 404:
             return None
         resp.raise_for_status()
+        self._track_credits(resp, estimated=1)
         data = resp.json()
         return data.get("email")
 
@@ -112,14 +168,18 @@ class SpecterClient:
             params["ceo"] = True
         if department:
             params["department"] = department
+        self._check_budget(1)
         resp = self._client.get(f"/companies/{company_id}/people", params=params)
         resp.raise_for_status()
+        self._track_credits(resp, estimated=1)
         return resp.json() if isinstance(resp.json(), list) else []
 
     def search_company(self, query: str) -> list[dict]:
         """GET /companies/search?query=..."""
+        self._check_budget(1)
         resp = self._client.get("/companies/search", params={"query": query})
         resp.raise_for_status()
+        self._track_credits(resp, estimated=1)
         return resp.json() if isinstance(resp.json(), list) else []
 
     # ------------------------------------------------------------------
@@ -138,6 +198,7 @@ class SpecterClient:
             batch = resp.json()
             if not isinstance(batch, list) or len(batch) == 0:
                 break
+            self._track_credits(resp, estimated=len(batch))
             collected.extend(batch)
             if len(batch) < page_size:
                 break

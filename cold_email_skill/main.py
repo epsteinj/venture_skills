@@ -5,12 +5,12 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import sys
 
 from cold_email_skill.clients.affinity import AffinityClient
 from cold_email_skill.clients.n8n import N8NClient
 from cold_email_skill.clients.specter import SpecterClient
 from cold_email_skill.config import Settings
+from cold_email_skill.dedup import DedupStore
 from cold_email_skill.skill import ColdEmailSkill
 
 
@@ -21,6 +21,17 @@ def main(argv: list[str] | None = None) -> None:
         type=int,
         default=50,
         help="Max leads to fetch from Specter (default: 50)",
+    )
+    parser.add_argument(
+        "--max-credits",
+        type=int,
+        default=None,
+        help="Stop processing if Specter credit usage would exceed this number",
+    )
+    parser.add_argument(
+        "--no-dedup",
+        action="store_true",
+        help="Disable deduplication (allow re-drafting the same person)",
     )
     parser.add_argument(
         "--dry-run",
@@ -36,9 +47,14 @@ def main(argv: list[str] | None = None) -> None:
     )
 
     settings = Settings()
-    specter = SpecterClient(settings.specter_api_key, settings.specter_base_url)
+    specter = SpecterClient(
+        settings.specter_api_key,
+        settings.specter_base_url,
+        max_credits=args.max_credits,
+    )
     affinity = AffinityClient(settings.affinity_api_key, settings.affinity_base_url)
     n8n = N8NClient(settings.n8n_webhook_url)
+    dedup = None if args.no_dedup else DedupStore()
 
     try:
         skill = ColdEmailSkill(
@@ -47,12 +63,11 @@ def main(argv: list[str] | None = None) -> None:
             n8n=n8n,
             sender_email=settings.sender_email,
             days_since_last_interaction=settings.days_since_last_interaction,
+            dedup=dedup,
         )
 
         if args.dry_run:
             logging.info("DRY RUN – drafts will NOT be created")
-            # In dry-run mode we still fetch leads and check Affinity,
-            # but swap in a no-op N8N client.
             skill._n8n = _NoOpN8N()
 
         result = skill.run(
@@ -65,6 +80,8 @@ def main(argv: list[str] | None = None) -> None:
         specter.close()
         affinity.close()
         n8n.close()
+        if dedup:
+            dedup.close()
 
 
 class _NoOpN8N:
