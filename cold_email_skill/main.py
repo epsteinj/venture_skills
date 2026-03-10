@@ -55,7 +55,11 @@ def main(argv: list[str] | None = None) -> None:
             # but swap in a no-op N8N client.
             skill._n8n = _NoOpN8N()
 
-        result = skill.run(limit=args.limit)
+        result = skill.run(
+            limit=args.limit,
+            people_list_id=settings.specter_people_list_id,
+            saved_search_id=settings.specter_saved_search_id,
+        )
         print(json.dumps(result.__dict__, indent=2))
     finally:
         specter.close()

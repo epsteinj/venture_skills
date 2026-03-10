@@ -15,9 +15,12 @@ def _require(key: str) -> str:
 
 
 class Settings:
-    # Specter
+    # Specter  (docs: https://api.tryspecter.com/api-ref/introduction)
     specter_api_key: str = _require("SPECTER_API_KEY")
-    specter_base_url: str = os.getenv("SPECTER_BASE_URL", "https://api.specter.com/v1")
+    specter_base_url: str = os.getenv("SPECTER_BASE_URL", "https://app.tryspecter.com/api/v1")
+    # Provide exactly ONE of these to tell the skill where to pull leads from:
+    specter_people_list_id: str | None = os.getenv("SPECTER_PEOPLE_LIST_ID")
+    specter_saved_search_id: str | None = os.getenv("SPECTER_SAVED_SEARCH_ID")
 
     # Affinity
     affinity_api_key: str = _require("AFFINITY_API_KEY")

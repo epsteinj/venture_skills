@@ -44,11 +44,25 @@ class ColdEmailSkill:
         self._sender_email = sender_email
         self._days = days_since_last_interaction
 
-    def run(self, *, limit: int = 50) -> SkillResult:
-        """Execute the full cold-email pipeline and return a summary."""
+    def run(
+        self,
+        *,
+        limit: int = 50,
+        people_list_id: str | None = None,
+        saved_search_id: str | None = None,
+    ) -> SkillResult:
+        """Execute the full cold-email pipeline and return a summary.
+
+        Provide *one* of ``people_list_id`` or ``saved_search_id`` to
+        tell the skill which Specter lead source to pull from.
+        """
         result = SkillResult()
 
-        leads = self._specter.get_leads(limit=limit)
+        leads = self._fetch_leads(
+            limit=limit,
+            people_list_id=people_list_id,
+            saved_search_id=saved_search_id,
+        )
         result.leads_fetched = len(leads)
         logger.info("Fetched %d leads from Specter", len(leads))
 
@@ -72,6 +86,20 @@ class ColdEmailSkill:
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
+
+    def _fetch_leads(
+        self,
+        *,
+        limit: int,
+        people_list_id: str | None,
+        saved_search_id: str | None,
+    ) -> list[Lead]:
+        if people_list_id:
+            return self._specter.get_people_list_results(people_list_id, limit=limit)
+        if saved_search_id:
+            return self._specter.get_saved_search_results(saved_search_id, limit=limit)
+        # Fallback: try the generic get_leads (works with test fakes)
+        return self._specter.get_leads(limit=limit)
 
     def _process_lead(self, lead: Lead, result: SkillResult) -> None:
         if self._affinity.has_recent_interaction(lead.email, days=self._days):
