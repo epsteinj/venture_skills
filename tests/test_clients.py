@@ -239,6 +239,65 @@ class TestSpecterClient:
         assert route.called
         assert len(results) == 1
 
+    @respx.mock
+    def test_search_companies_for_leads(self):
+        """Semantic search: company search → get people → leads."""
+        # Mock company search
+        respx.get(
+            f"{self.BASE}/companies/search",
+            params__contains={"query": "cybersecurity"},
+        ).respond(json=[
+            {"id": "co1", "name": "CyberCo", "domain": "cyberco.com"},
+            {"id": "co2", "name": "SecureInc", "domain": "secureinc.com"},
+        ])
+
+        # Mock get people for each company
+        respx.get(f"{self.BASE}/companies/co1/people").respond(json=[
+            {"person_id": "p1", "first_name": "Alice", "last_name": "Smith",
+             "current_position_company_name": "CyberCo", "current_position_title": "CEO"},
+        ])
+        respx.get(f"{self.BASE}/companies/co2/people").respond(json=[
+            {"person_id": "p2", "first_name": "Bob", "last_name": "Jones",
+             "current_position_company_name": "SecureInc", "current_position_title": "Founder"},
+        ])
+
+        client = SpecterClient("sk-test", self.BASE)
+        leads = client.search_companies_for_leads(
+            ["cybersecurity"],
+            founders=True,
+            max_companies=10,
+        )
+
+        assert len(leads) == 2
+        assert leads[0].specter_id == "p1"
+        assert leads[0].company == "CyberCo"
+        assert leads[1].specter_id == "p2"
+
+    @respx.mock
+    def test_search_companies_deduplicates(self):
+        """Same company from multiple queries should only be processed once."""
+        respx.get(
+            f"{self.BASE}/companies/search",
+            params__contains={"query": "cyber"},
+        ).respond(json=[{"id": "co1", "name": "CyberCo"}])
+
+        respx.get(
+            f"{self.BASE}/companies/search",
+            params__contains={"query": "security"},
+        ).respond(json=[{"id": "co1", "name": "CyberCo"}])  # same company
+
+        people_route = respx.get(f"{self.BASE}/companies/co1/people").respond(json=[
+            {"person_id": "p1", "first_name": "A", "last_name": "B",
+             "current_position_company_name": "CyberCo"},
+        ])
+
+        client = SpecterClient("sk-test", self.BASE)
+        leads = client.search_companies_for_leads(["cyber", "security"])
+
+        # Company only fetched once despite appearing in both queries
+        assert people_route.call_count == 1
+        assert len(leads) == 1
+
 
 # =====================================================================
 # N8N

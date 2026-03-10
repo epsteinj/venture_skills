@@ -11,11 +11,24 @@ from cold_email_skill.clients.n8n import N8NClient
 from cold_email_skill.clients.specter import SpecterClient
 from cold_email_skill.config import Settings
 from cold_email_skill.dedup import DedupStore
+from cold_email_skill.query_parser import parse_simple, parse_with_llm
 from cold_email_skill.skill import ColdEmailSkill
 
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Cold outbound email skill")
+    parser.add_argument(
+        "--query", "-q",
+        type=str,
+        default=None,
+        help='Natural-language search, e.g. "Seed cybersecurity companies for RSA"',
+    )
+    parser.add_argument(
+        "--use-llm",
+        action="store_true",
+        help="Use Claude to parse --query (requires ANTHROPIC_API_KEY). "
+        "Falls back to rule-based parsing if not set.",
+    )
     parser.add_argument(
         "--limit",
         type=int,
@@ -46,6 +59,21 @@ def main(argv: list[str] | None = None) -> None:
         format="%(asctime)s  %(levelname)-8s  %(message)s",
     )
 
+    logger = logging.getLogger(__name__)
+
+    # ── Parse semantic query if provided ─────────────────────────────
+    search_query = None
+    outreach_context = None
+
+    if args.query:
+        if args.use_llm:
+            search_query = parse_with_llm(args.query)
+        else:
+            search_query = parse_simple(args.query)
+
+        outreach_context = search_query.context
+        logger.info("Parsed query → %s", search_query.model_dump_json(indent=2))
+
     settings = Settings()
     specter = SpecterClient(
         settings.specter_api_key,
@@ -64,6 +92,7 @@ def main(argv: list[str] | None = None) -> None:
             sender_email=settings.sender_email,
             days_since_last_interaction=settings.days_since_last_interaction,
             dedup=dedup,
+            outreach_context=outreach_context,
         )
 
         if args.dry_run:
@@ -74,6 +103,7 @@ def main(argv: list[str] | None = None) -> None:
             limit=args.limit,
             people_list_id=settings.specter_people_list_id,
             saved_search_id=settings.specter_saved_search_id,
+            search_query=search_query,
         )
         print(json.dumps(result.__dict__, indent=2))
     finally:

@@ -183,6 +183,93 @@ class SpecterClient:
         return resp.json() if isinstance(resp.json(), list) else []
 
     # ------------------------------------------------------------------
+    # Semantic search: company search → people
+    # ------------------------------------------------------------------
+
+    def search_companies_for_leads(
+        self,
+        queries: list[str],
+        *,
+        founders: bool = True,
+        ceo: bool = False,
+        department: str | None = None,
+        max_companies: int = 20,
+        people_limit: int = 5,
+    ) -> list[Lead]:
+        """Search for companies by keyword, then fetch people from each.
+
+        1. Run each query against /companies/search
+        2. Deduplicate companies by id
+        3. Fetch people (founders/CEO/department) from each company
+        4. Return as Lead objects (email still needs resolution)
+        """
+        # Collect unique companies across all queries
+        seen_ids: set[str] = set()
+        companies: list[dict] = []
+
+        for query in queries:
+            try:
+                results = self.search_company(query)
+            except Exception as exc:
+                logger.warning("Company search failed for %r: %s", query, exc)
+                continue
+
+            for co in results:
+                co_id = co.get("id", "")
+                if co_id and co_id not in seen_ids:
+                    seen_ids.add(co_id)
+                    companies.append(co)
+                    if len(companies) >= max_companies:
+                        break
+            if len(companies) >= max_companies:
+                break
+
+        logger.info(
+            "Found %d unique companies from %d queries",
+            len(companies), len(queries),
+        )
+
+        # Fetch people from each company
+        leads: list[Lead] = []
+        seen_person_ids: set[str] = set()
+
+        for co in companies:
+            co_id = co["id"]
+            co_name = co.get("name", "")
+            try:
+                people = self.get_company_people(
+                    co_id,
+                    founders=founders,
+                    ceo=ceo,
+                    department=department,
+                    limit=people_limit,
+                )
+            except Exception as exc:
+                logger.warning("Failed to get people for %s: %s", co_name, exc)
+                continue
+
+            for person in people:
+                pid = person.get("person_id", "")
+                if not pid or pid in seen_person_ids:
+                    continue
+                seen_person_ids.add(pid)
+
+                leads.append(
+                    Lead(
+                        specter_id=pid,
+                        first_name=person.get("first_name", ""),
+                        last_name=person.get("last_name", ""),
+                        email="",
+                        company=person.get("current_position_company_name") or co_name,
+                        title=person.get("current_position_title") or person.get("level_of_seniority"),
+                        linkedin_url=person.get("linkedin_url"),
+                    )
+                )
+
+        logger.info("Collected %d leads from %d companies", len(leads), len(companies))
+        return leads
+
+    # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
 

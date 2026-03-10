@@ -19,6 +19,7 @@ from cold_email_skill.clients.specter import CreditBudgetExceeded, SpecterClient
 from cold_email_skill.dedup import DedupStore
 from cold_email_skill.models.email_draft import EmailDraft
 from cold_email_skill.models.lead import Lead
+from cold_email_skill.models.search_query import SearchQuery
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +46,7 @@ class ColdEmailSkill:
         sender_email: str,
         days_since_last_interaction: int = 90,
         dedup: DedupStore | None = None,
+        outreach_context: str | None = None,
     ) -> None:
         self._specter = specter
         self._affinity = affinity
@@ -52,6 +54,7 @@ class ColdEmailSkill:
         self._sender_email = sender_email
         self._days = days_since_last_interaction
         self._dedup = dedup
+        self._outreach_context = outreach_context
 
     def run(
         self,
@@ -59,11 +62,14 @@ class ColdEmailSkill:
         limit: int = 50,
         people_list_id: str | None = None,
         saved_search_id: str | None = None,
+        search_query: SearchQuery | None = None,
     ) -> SkillResult:
         """Execute the full cold-email pipeline and return a summary.
 
-        Provide *one* of ``people_list_id`` or ``saved_search_id`` to
-        tell the skill which Specter lead source to pull from.
+        Lead sources (provide one):
+        - ``people_list_id``: pull from a Specter people list
+        - ``saved_search_id``: pull from a Specter saved search
+        - ``search_query``: semantic search — find companies then get people
         """
         result = SkillResult()
 
@@ -72,6 +78,7 @@ class ColdEmailSkill:
                 limit=limit,
                 people_list_id=people_list_id,
                 saved_search_id=saved_search_id,
+                search_query=search_query,
             )
         except CreditBudgetExceeded as exc:
             result.errors.append(str(exc))
@@ -122,7 +129,16 @@ class ColdEmailSkill:
         limit: int,
         people_list_id: str | None,
         saved_search_id: str | None,
+        search_query: SearchQuery | None = None,
     ) -> list[Lead]:
+        if search_query:
+            return self._specter.search_companies_for_leads(
+                search_query.company_queries,
+                founders=search_query.founders,
+                ceo=search_query.ceo,
+                department=search_query.department,
+                max_companies=search_query.max_companies,
+            )
         if people_list_id:
             return self._specter.get_people_list_results(people_list_id, limit=limit)
         if saved_search_id:
@@ -165,13 +181,23 @@ class ColdEmailSkill:
             self._dedup.record_draft(lead.email, lead.specter_id)
 
     def _build_draft(self, lead: Lead) -> EmailDraft:
-        subject = f"Quick intro – {lead.company}"
-        body_html = (
-            f"<p>Hi {lead.first_name},</p>"
-            f"<p>I came across {lead.company} and wanted to reach out. "
-            f"Would love to find a few minutes to connect.</p>"
-            f"<p>Best,<br/>The Team</p>"
-        )
+        if self._outreach_context:
+            subject = f"{self._outreach_context} – {lead.company}"
+            body_html = (
+                f"<p>Hi {lead.first_name},</p>"
+                f"<p>I'm attending {self._outreach_context} and came across "
+                f"{lead.company}. Would love to find a few minutes to connect "
+                f"while we're both there.</p>"
+                f"<p>Best,<br/>The Team</p>"
+            )
+        else:
+            subject = f"Quick intro – {lead.company}"
+            body_html = (
+                f"<p>Hi {lead.first_name},</p>"
+                f"<p>I came across {lead.company} and wanted to reach out. "
+                f"Would love to find a few minutes to connect.</p>"
+                f"<p>Best,<br/>The Team</p>"
+            )
         return EmailDraft(
             to_email=lead.email,
             to_name=lead.full_name,
